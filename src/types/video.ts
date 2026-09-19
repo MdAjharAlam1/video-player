@@ -51,3 +51,11 @@ export interface PlaybackHistory {
   duration: number;
   lastPlayedAt: number;
 }
+
+export interface LibraryRecord {
+  id: string;
+  name: string;
+  directoryHandle: FileSystemDirectoryHandle;
+  createdAt: number;
+  updatedAt: number;
+}

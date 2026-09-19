@@ -17,7 +17,9 @@ import {
   scanFileList,
   findMatchingSubtitles,
 } from './utils/fileSystem';
-import { Upload } from 'lucide-react';
+import { getSavedLibrary, saveLibrary } from './utils/db';
+import { checkFolderPermission, requestFolderPermission } from './utils/permission';
+import { Upload, KeyRound } from 'lucide-react';
 
 export function App() {
   const [rootFolder, setRootFolder] = useState<FolderNode | null>(null);
@@ -25,12 +27,37 @@ export function App() {
   const [allSubtitles, setAllSubtitles] = useState<SubtitleItem[]>([]);
   const [currentVideoIndex, setCurrentVideoIndex] = useState<number>(-1);
 
+  const [savedHandle, setSavedHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [permissionState, setPermissionState] = useState<'granted' | 'prompt' | 'denied' | 'none'>('none');
+
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [viewMode, setViewMode] = useState<ViewMode>('tree');
   const [sortOption, setSortOption] = useState<SortOption>('name-asc');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [isShortcutsOpen, setIsShortcutsOpen] = useState<boolean>(false);
   const [isDragOver, setIsDragOver] = useState<boolean>(false);
+
+  // Theme Mode State ('dark' | 'light')
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    try {
+      const saved = localStorage.getItem('streamlocal_theme');
+      return saved === 'light' || saved === 'dark' ? saved : 'dark';
+    } catch {
+      return 'dark';
+    }
+  });
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  };
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('streamlocal_theme', theme);
+    } catch (e) {
+      console.warn('Failed saving theme to localStorage:', e);
+    }
+  }, [theme]);
 
   // Favorites state persisted in localStorage
   const [favorites, setFavorites] = useState<Set<string>>(() => {
@@ -72,6 +99,71 @@ export function App() {
     }
   }, [history]);
 
+  // Refresh / Rescan Library against saved root directory handle
+  const refreshLibrary = useCallback(async (handleToUse?: FileSystemDirectoryHandle) => {
+    const targetHandle = handleToUse || savedHandle;
+    if (!targetHandle) return;
+
+    const perm = await checkFolderPermission(targetHandle);
+    setPermissionState(perm);
+
+    if (perm === 'granted') {
+      const { rootFolder: root, allVideos: videos, allSubtitles: subs } =
+        await scanDirectoryHandle(targetHandle);
+
+      setRootFolder(root);
+      setAllVideos(videos);
+      setAllSubtitles(subs);
+
+      setCurrentVideoIndex((prevIndex) => {
+        if (prevIndex === -1 && videos.length > 0) return 0;
+        if (prevIndex >= videos.length) return Math.max(-1, videos.length - 1);
+        return prevIndex;
+      });
+    }
+  }, [savedHandle]);
+
+  // Restore Saved Root Folder Handle on Application Startup
+  useEffect(() => {
+    async function restoreSavedLibrary() {
+      try {
+        const record = await getSavedLibrary('main-library');
+        if (record && record.directoryHandle) {
+          setSavedHandle(record.directoryHandle);
+          const perm = await checkFolderPermission(record.directoryHandle);
+          setPermissionState(perm);
+
+          if (perm === 'granted') {
+            const { rootFolder: root, allVideos: videos, allSubtitles: subs } =
+              await scanDirectoryHandle(record.directoryHandle);
+
+            setRootFolder(root);
+            setAllVideos(videos);
+            setAllSubtitles(subs);
+            if (videos.length > 0) {
+              setCurrentVideoIndex(0);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Failed restoring stored library handle:', err);
+      }
+    }
+
+    restoreSavedLibrary();
+  }, []);
+
+  // Handle explicit permission grant request
+  const handleGrantPermission = async () => {
+    if (!savedHandle) return;
+    const newPerm = await requestFolderPermission(savedHandle);
+    setPermissionState(newPerm);
+
+    if (newPerm === 'granted') {
+      refreshLibrary(savedHandle);
+    }
+  };
+
   const toggleFavorite = (videoId: string) => {
     setFavorites((prev) => {
       const next = new Set(prev);
@@ -98,20 +190,23 @@ export function App() {
     });
   }, []);
 
-  // Open Directory via File System Access API
+  // Open Directory via File System Access API & Save to IndexedDB
   const handleOpenDirectory = async () => {
     try {
-      // @ts-expect-error window.showDirectoryPicker standard in modern browsers
-      const dirHandle = await window.showDirectoryPicker();
-      const { rootFolder: root, allVideos: videos, allSubtitles: subs } =
-        await scanDirectoryHandle(dirHandle);
+      // @ts-expect-error window.showDirectoryPicker
+      const dirHandle: FileSystemDirectoryHandle = await window.showDirectoryPicker({ mode: 'read' });
 
-      setRootFolder(root);
-      setAllVideos(videos);
-      setAllSubtitles(subs);
-      if (videos.length > 0) {
-        setCurrentVideoIndex(0);
-      }
+      await saveLibrary({
+        id: 'main-library',
+        name: dirHandle.name,
+        directoryHandle: dirHandle,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+
+      setSavedHandle(dirHandle);
+      setPermissionState('granted');
+      refreshLibrary(dirHandle);
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
         console.error('Error opening folder:', err);
@@ -191,12 +286,16 @@ export function App() {
     ? findMatchingSubtitles(currentVideo, allSubtitles)
     : [];
 
+  const isDark = theme === 'dark';
+
   return (
     <div
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className="flex flex-col h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden"
+      className={`flex flex-col h-screen font-sans overflow-hidden transition-colors duration-300 ${
+        isDark ? 'bg-slate-950 text-slate-100' : 'bg-slate-100/90 text-slate-900'
+      }`}
     >
       {/* Top Navigation Header */}
       <Header
@@ -209,7 +308,31 @@ export function App() {
         totalVideos={allVideos.length}
         sidebarOpen={sidebarOpen}
         supportsDirectoryPicker={supportsDirectoryPicker}
+        permissionState={permissionState}
+        onGrantPermission={handleGrantPermission}
+        onRefreshLibrary={() => refreshLibrary()}
+        hasSavedLibrary={!!savedHandle}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
+
+      {/* Permission Banner Prompt when access confirmation is required */}
+      {permissionState === 'prompt' && savedHandle && (
+        <div className="bg-gradient-to-r from-amber-600/90 to-amber-700/90 text-white px-4 py-2.5 flex items-center justify-between text-xs shadow-md z-30">
+          <div className="flex items-center space-x-2">
+            <KeyRound className="w-4 h-4 animate-pulse shrink-0" />
+            <span>
+              Permission required to read folder <strong>"{savedHandle.name}"</strong> across browser sessions.
+            </span>
+          </div>
+          <button
+            onClick={handleGrantPermission}
+            className="px-3 py-1 bg-white text-amber-900 rounded-lg font-bold text-xs hover:bg-amber-100 transition-colors shadow"
+          >
+            Grant Access
+          </button>
+        </div>
+      )}
 
       {/* Main Workspace Body */}
       <div className="flex-1 flex overflow-hidden relative">
@@ -228,6 +351,7 @@ export function App() {
             sortOption={sortOption}
             onSortChange={setSortOption}
             searchQuery={searchQuery}
+            theme={theme}
           />
         )}
 
@@ -251,6 +375,7 @@ export function App() {
             onOpenDirectory={handleOpenDirectory}
             onOpenFiles={handleOpenFiles}
             supportsDirectoryPicker={supportsDirectoryPicker}
+            theme={theme}
           />
         )}
       </div>
@@ -258,10 +383,12 @@ export function App() {
       {/* Drag & Drop Visual Overlay */}
       {isDragOver && (
         <div className="fixed inset-0 bg-indigo-600/30 backdrop-blur-md border-4 border-dashed border-indigo-400 z-50 flex items-center justify-center pointer-events-none animate-in fade-in duration-150">
-          <div className="bg-slate-900/90 p-8 rounded-3xl text-center space-y-3 shadow-2xl border border-indigo-500/30">
-            <Upload className="w-12 h-12 text-indigo-400 mx-auto animate-bounce" />
-            <h3 className="text-xl font-bold text-white">Drop Folder or Video Files Here</h3>
-            <p className="text-xs text-indigo-200">Release mouse to scan and start streaming</p>
+          <div className={`p-8 rounded-3xl text-center space-y-3 shadow-2xl border ${
+            isDark ? 'bg-slate-900/90 border-indigo-500/30' : 'bg-white/95 border-indigo-300'
+          }`}>
+            <Upload className="w-12 h-12 text-indigo-500 mx-auto animate-bounce" />
+            <h3 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Drop Folder or Video Files Here</h3>
+            <p className={`text-xs ${isDark ? 'text-indigo-200' : 'text-indigo-600'}`}>Release mouse to scan and start streaming</p>
           </div>
         </div>
       )}
@@ -270,6 +397,7 @@ export function App() {
       <KeyboardShortcutsModal
         isOpen={isShortcutsOpen}
         onClose={() => setIsShortcutsOpen(false)}
+        theme={theme}
       />
     </div>
   );

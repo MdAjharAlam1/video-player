@@ -68,32 +68,41 @@ export async function scanDirectoryHandle(
     const videos: VideoItem[] = [];
     const subfolders: FolderNode[] = [];
 
-    // Iterating directory handle values
-    for await (const entry of (handle as unknown as AsyncIterable<FileSystemHandle>)) {
+    // Safely iterate handles (handle.values() yields handles, handle.entries() or asyncIterator yields [name, handle])
+    const handleWithValues = handle as unknown as { values?: () => AsyncIterable<unknown> };
+    const iterable = typeof handleWithValues.values === 'function' ? handleWithValues.values() : handle;
+
+    for await (const item of (iterable as unknown as AsyncIterable<unknown>)) {
+      // Normalize item whether it's a FileSystemHandle directly or a tuple [name, FileSystemHandle]
+      const entry = (Array.isArray(item) ? item[1] : item) as FileSystemHandle;
+      const entryName = (Array.isArray(item) ? item[0] : entry?.name) as string;
+
+      if (!entry) continue;
+
       if (entry.kind === 'file') {
         const fileHandle = entry as FileSystemFileHandle;
-        if (isVideoFile(entry.name)) {
+        if (isVideoFile(entryName)) {
           const file = await fileHandle.getFile();
           const video: VideoItem = {
-            id: `${currentPath}/${entry.name}`,
-            name: entry.name,
-            path: `${currentPath}/${entry.name}`,
+            id: `${currentPath}/${entryName}`,
+            name: entryName,
+            path: `${currentPath}/${entryName}`,
             file,
             handle: fileHandle,
             size: file.size,
             lastModified: file.lastModified,
-            extension: getFileExtension(entry.name),
+            extension: getFileExtension(entryName),
             parentFolderPath: currentPath,
           };
           videos.push(video);
           allVideos.push(video);
-        } else if (isSubtitleFile(entry.name)) {
+        } else if (isSubtitleFile(entryName)) {
           const file = await fileHandle.getFile();
-          const ext = getFileExtension(entry.name) as 'srt' | 'vtt';
+          const ext = getFileExtension(entryName) as 'srt' | 'vtt';
           const sub: SubtitleItem = {
-            id: `${currentPath}/${entry.name}`,
-            name: entry.name,
-            language: entry.name.split('.')[0] || 'Default',
+            id: `${currentPath}/${entryName}`,
+            name: entryName,
+            language: entryName.split('.')[0] || 'Default',
             file,
             url: '',
             format: ext,
@@ -104,7 +113,7 @@ export async function scanDirectoryHandle(
         const subDirHandle = entry as FileSystemDirectoryHandle;
         const subFolderNode = await processDirectory(
           subDirHandle,
-          currentPath ? `${currentPath}/${entry.name}` : entry.name
+          currentPath ? `${currentPath}/${entryName}` : entryName
         );
         if (subFolderNode.videos.length > 0 || subFolderNode.subfolders.length > 0) {
           subfolders.push(subFolderNode);
